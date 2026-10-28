@@ -7,7 +7,7 @@
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1e2430; }
     #renderCanvas { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
   </style>
 </head>
@@ -15,54 +15,114 @@
   <canvas id="renderCanvas"></canvas>
   <script>
     const canvas = document.getElementById("renderCanvas");
-    const engine = new BABYLON.Engine(canvas, true);
+    const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: false, stencil: true });
     const scene = new BABYLON.Scene(engine);
-    scene.clearColor = new BABYLON.Color4(0.12, 0.12, 0.12, 1);
 
-    const camera = new BABYLON.ArcRotateCamera(
-      "cam", Math.PI / 2, Math.PI / 2.5, 5, BABYLON.Vector3.Zero(), scene
-    );
+    // ---------- ФОН: градиентная сфера ----------
+    // Небо строится как большая сфера изнутри, цвет зависит от направления взгляда
+    const skyDome = BABYLON.MeshBuilder.CreateSphere("sky", { diameter: 1000, sideOrientation: BABYLON.Mesh.BACKSIDE }, scene);
+    const skyMat = new BABYLON.ShaderMaterial("skyMat", scene, {
+      vertex: "sky",
+      fragment: "sky"
+    }, {
+      attributes: ["position"],
+      uniforms: ["world", "worldViewProjection", "sunDir"]
+    });
+    skyMat.setVector3("sunDir", new BABYLON.Vector3(0.5, 0.7, 0.3).normalize());
+    skyDome.material = skyMat;
+    skyDome.infiniteDistance = true;
+
+    BABYLON.Effect.ShadersStore["skyVertexShader"] = `
+      precision highp float;
+      attribute vec3 position;
+      uniform mat4 worldViewProjection;
+      varying vec3 vDir;
+      void main() {
+        vDir = position;
+        gl_Position = worldViewProjection * vec4(position, 1.0);
+      }`;
+    BABYLON.Effect.ShadersStore["skyFragmentShader"] = `
+      precision highp float;
+      varying vec3 vDir;
+      uniform vec3 sunDir;
+      void main() {
+        vec3 d = normalize(vDir);
+        float h = d.y;                              // -1 низ, 1 верх
+        vec3 top    = vec3(0.55, 0.70, 0.90);       // голубой верх
+        vec3 horizon= vec3(0.92, 0.90, 0.86);       // светлый горизонт
+        vec3 ground = vec3(0.30, 0.31, 0.34);       // серый низ
+        vec3 col = mix(horizon, top, smoothstep(0.0, 0.6, h));
+        col = mix(ground, col, smoothstep(-0.2, 0.05, h));
+        // Светлое пятно вокруг солнца
+        float s = max(dot(d, normalize(sunDir)), 0.0);
+        col += vec3(1.0, 0.95, 0.8) * pow(s, 8.0) * 0.35;
+        gl_FragColor = vec4(col, 1.0);
+      }`;
+
+    // ---------- КАМЕРА ----------
+    const camera = new BABYLON.ArcRotateCamera("cam", Math.PI / 2, Math.PI / 2.5, 5, BABYLON.Vector3.Zero(), scene);
     camera.attachControl(canvas, true);
-
-    // Вращение: левая кнопка (и один палец на телефоне)
     camera.angularSensibilityX = 1000;
     camera.angularSensibilityY = 1000;
-
-    // Перемещение: правая кнопка мыши или Shift + левая; два пальца на телефоне
     camera.panningSensibility = 50;
-    camera.panningDistanceLimit = null;
-    camera.inputs.attached.pointers.buttons = [0, 1, 2]; // 0 - вращение, 1 - зум, 2 - панорама
+    camera.inputs.attached.pointers.buttons = [0, 1, 2];
     camera.inputs.attached.pointers.panningMouseButton = 2;
-
-    // Масштабирование колесом: чем меньше значение, тем быстрее зум
     camera.wheelPrecision = 10;
     camera.pinchPrecision = 20;
-    camera.lowerRadiusLimit = 0.01;
 
-    new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+    // ---------- ОКРУЖЕНИЕ ДЛЯ ОТРАЖЕНИЙ ----------
+    // Процедурная среда без внешних файлов: стекло будет отражать мягкое небо
+    scene.environmentTexture = BABYLON.CubeTexture.CreateFromPrefilteredData
+      ? null
+      : null;
+    const envTex = BABYLON.Texture; // заглушка, см. ниже
+    scene.createDefaultEnvironment?.({ createGround: false, createSkybox: false, enableGroundShadow: false });
 
+    // ---------- СВЕТ И ТЕНИ ----------
+    // Солнце: направленный свет с тенями
+    const sunDir = new BABYLON.Vector3(-0.5, -0.8, -0.3).normalize();
+    const sun = new BABYLON.DirectionalLight("sun", sunDir, scene);
+    sun.intensity = 1.2;
+    sun.position = sunDir.scale(-100);
+    sun.position.y = 100;
+
+    const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
+    hemi.intensity = 0.4;
+
+    const shadowGen = new BABYLON.ShadowGenerator(2048, sun);
+    shadowGen.useBlurExponentialShadowMap = true;
+    shadowGen.blurKernel = 32;
+
+    // ---------- ЗАГРУЗКА МОДЕЛИ ----------
     BABYLON.SceneLoader.Append("./", "1172_Otradnoe_KPT-87-1.glb", scene, () => {
-      // Вычисляем границы всех мешей модели
       let min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
       let max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
       scene.meshes.forEach(mesh => {
-        if (!mesh.isVisible || mesh.getTotalVertices() === 0) return;
+        if (mesh === skyDome || !mesh.isVisible || mesh.getTotalVertices() === 0) return;
         mesh.computeWorldMatrix(true);
         const bb = mesh.getBoundingInfo().boundingBox;
         min = BABYLON.Vector3.Minimize(min, bb.minimumWorld);
         max = BABYLON.Vector3.Maximize(max, bb.maximumWorld);
+        shadowGen.addShadowCaster(mesh);
+        mesh.receiveShadows = true;
       });
 
       const center = BABYLON.Vector3.Center(min, max);
-      const size = max.subtract(min);
-      const radius = size.length() / 2;
+      const radius = max.subtract(min).length() / 2;
 
       camera.setTarget(center);
-      camera.radius = radius * 2.2;   // отступ, чтобы модель целиком попадала в кадр
+      camera.radius = radius * 2.2;
       camera.lowerRadiusLimit = radius * 0.05;
       camera.upperRadiusLimit = radius * 10;
       camera.minZ = radius / 100;
       camera.maxZ = radius * 100;
+
+      // Солнце ставим над центром модели, чтобы тени падали correctly
+      sun.position = center.add(sunDir.scale(-radius * 3));
+      sun.shadowMinZ = radius * 0.1;
+      sun.shadowMaxZ = radius * 6;
+      skyDome.scaling.setAll(radius * 4);
+      skyDome.position = center.clone();
     });
 
     engine.runRenderLoop(() => scene.render());
